@@ -91,11 +91,60 @@ This schema is the **single source of truth** that prevents the front end from "
 *   **ASSGDQTY / XSSQTY:** Allocated Quantity / Excess Quantity.
 *   **CREATIONDATETIME / LASTCHANGEDATETIME:** Timestamps for version tracking.
 
+#### 5.3.1 Readiness Model (Calculated Status)
+
+The application computes a normalized readiness status per pegged relationship using four inputs. Precedence: `MISSING` > `LATE` > `AT_RISK` > `READY`; `UNKNOWN` used when insufficient data.
+
+- Inputs
+  - Late_Supply_Flag: 1 if `REPOBJ_DATE > RQMT_DATE` after grace window; else 0.
+  - Capacity_Risk_Flag: 1 if `REMAINING_HOURS > capacity_hours_threshold`; else 0.
+  - Exception_Severity: Weighted score aggregated from ZMRP exceptions on the pegged `REPOBJ`.
+  - Planner_Load_Impact: `alpha * exception_count + beta * remaining_hours`.
+
+- Status Logic
+  - MISSING: `repobj` is null or `ASSGDQTY = 0`.
+  - UNKNOWN: `rqmt_date` and `repobj_date` both null and no other signal.
+  - LATE: `Late_Supply_Flag = 1` OR `Exception_Severity >= severity_threshold_high`.
+  - AT_RISK: any of (`Capacity_Risk_Flag = 1`, `Exception_Severity >= severity_threshold_med`, `Planner_Load_Impact >= planner_load_threshold`).
+  - READY: none of the above.
+
+#### 5.3.2 SQL Server Field Sizes and Columns
+
+- PMMO IDs (`pspnr_assgd`, `project_global_id`, `top_req_obj`, `repobj_nha`, `repobj`) are `nvarchar(50)`.
+- Readiness driver columns on `Material_Status_Tracker`:
+  - `rqmt_date_utc datetime2(3)`
+  - `repobj_date_utc datetime2(3)`
+  - `remaining_hours decimal(18,2)`
+  - `late_supply_flag bit`
+  - `capacity_risk_flag bit`
+  - `exception_severity_score decimal(10,2)`
+  - `planner_load_impact_score decimal(10,2)`
+  - `material_readiness_status nvarchar(16)` (domain: READY, AT_RISK, LATE, MISSING, UNKNOWN)
+
+#### 5.3.3 Control Tables (Thresholds and Weights)
+
+- `Material_Readiness_Status_Lookup(material_readiness_status nvarchar(16) PK, precedence tinyint)`
+- `Risk_Thresholds` (scoped overrides by `plant`, `mrp_controller`, `planning_group`):
+  - `capacity_hours_threshold decimal(18,2)`
+  - `late_days_threshold int` (grace window; 0 means any slip is late)
+  - `severity_threshold_med decimal(10,2)`
+  - `severity_threshold_high decimal(10,2)`
+  - `planner_load_threshold decimal(10,2)`
+  - `alpha_exception_count decimal(10,4)`, `beta_remaining_hours decimal(10,4)`
+  - `is_default bit`
+- `Exception_Weights(exception_code nvarchar(32) PK, weight decimal(10,2), severity_level tinyint)`
+
 ### 5.4 Stage 4: Reporting (API Layer)
 
 *   **API Design:** API must be designed for **simplicity** and **consistency** (using consistent naming and patterns).
 *   **Performance:** Must use **pagination** if large datasets are retrieved. API must support **filtering** and **sorting** in the back end via query parameters to optimize performance.
 *   **Real-time Potential:** Although HTTP is standard, consider the use of **WebSockets** for potential future real-time SO Change Alerts.
+*   **Recommended Filters (Readiness):** `project_global_id`, `material_readiness_status`, `late_supply_flag`, `capacity_risk_flag`, `material_number`, `repobj_date_utc` range, `last_change_datetime_utc` range; common sort: `last_change_datetime_utc DESC`.
+
+### 5.5 Implementation Artifacts
+
+- SQL Server DDL and stored procedure to compute readiness (reference provided in design conversation). Use the field sizes and control tables specified above.
+- PowerShell ETL skeleton provided at `etl/Run-MasterTrackerETL.ps1` to orchestrate Stage 1 (SAP/SAC acquisition), Stage 2 (transformation), and Stage 3 (compile + readiness update).
 
 ## 6. Future Enhancements (Roadmap)
 
